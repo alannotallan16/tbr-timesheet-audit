@@ -301,16 +301,29 @@ function buildScheduleLookup(rawData, columnMap) {
   return lookup;
 }
 
-// ─── Utility: Check if IP is a known office IP ───
+// ─── Utility: Check if IP falls within an office IP range ───
+function ipInRange(ip, ipFrom, ipTo) {
+  if (!ip || !ipFrom || !ipTo) return false;
+  const parts = ip.trim().split(".").map(Number);
+  const fromParts = ipFrom.trim().split(".").map(Number);
+  const toParts = ipTo.trim().split(".").map(Number);
+  if (parts.length !== 4 || fromParts.length !== 4 || toParts.length !== 4) return false;
+  // Check first 3 octets match
+  for (let i = 0; i < 3; i++) {
+    if (parts[i] !== fromParts[i]) return false;
+  }
+  return parts[3] >= fromParts[3] && parts[3] <= toParts[3];
+}
+
 function isOfficeIP(ip, officeIPs) {
   if (!ip) return false;
-  return officeIPs.some((o) => o.ip.trim() === ip.trim());
+  return officeIPs.some((o) => ipInRange(ip, o.ipFrom, o.ipTo));
 }
 
 // ─── Utility: Get office IP label ───
 function getOfficeIPLabel(ip, officeIPs) {
   if (!ip) return null;
-  const match = officeIPs.find((o) => o.ip.trim() === ip.trim());
+  const match = officeIPs.find((o) => ipInRange(ip, o.ipFrom, o.ipTo));
   return match ? match.label : null;
 }
 
@@ -893,9 +906,9 @@ function Dashboard({ user, onLogout }) {
   const [processedSprout, setProcessedSprout] = useState(null);
   const [scheduleLookup, setScheduleLookup] = useState(null);
   const [officeIPs, setOfficeIPs] = useState([
-    { label: "EST", ip: "116.50.227.176" },
-    { label: "ComClark", ip: "161.49.192.112" },
-    { label: "ComClark 7F", ip: "136.239.243.241" },
+    { label: "EST", ipFrom: "116.50.227.176", ipTo: "116.50.227.181" },
+    { label: "ComClark", ipFrom: "161.49.192.112", ipTo: "161.49.192.116" },
+    { label: "ComClark 7F", ipFrom: "136.239.243.241", ipTo: "136.239.243.246" },
   ]);
   const [preprocessSummary, setPreprocessSummary] = useState(null);
 
@@ -1292,18 +1305,30 @@ function Dashboard({ user, onLogout }) {
                         setOfficeIPs(updated);
                       }}
                       placeholder="Label (e.g. EST)"
-                      style={{ width: 140, padding: "8px 10px", border: "2px solid #e0e0e0", borderRadius: 2, fontSize: 12, fontFamily: "'Montserrat', sans-serif", boxSizing: "border-box" }}
+                      style={{ width: 120, padding: "8px 10px", border: "2px solid #e0e0e0", borderRadius: 2, fontSize: 12, fontFamily: "'Montserrat', sans-serif", boxSizing: "border-box" }}
                     />
                     <input
                       type="text"
-                      value={entry.ip}
+                      value={entry.ipFrom}
                       onChange={(e) => {
                         const updated = [...officeIPs];
-                        updated[idx] = { ...updated[idx], ip: e.target.value };
+                        updated[idx] = { ...updated[idx], ipFrom: e.target.value };
                         setOfficeIPs(updated);
                       }}
-                      placeholder="IP Address"
-                      style={{ width: 180, padding: "8px 10px", border: "2px solid #e0e0e0", borderRadius: 2, fontSize: 12, fontFamily: "'Montserrat', monospace", boxSizing: "border-box" }}
+                      placeholder="IP From"
+                      style={{ width: 160, padding: "8px 10px", border: "2px solid #e0e0e0", borderRadius: 2, fontSize: 12, fontFamily: "'Montserrat', monospace", boxSizing: "border-box" }}
+                    />
+                    <span style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 12, color: "#999" }}>to</span>
+                    <input
+                      type="text"
+                      value={entry.ipTo}
+                      onChange={(e) => {
+                        const updated = [...officeIPs];
+                        updated[idx] = { ...updated[idx], ipTo: e.target.value };
+                        setOfficeIPs(updated);
+                      }}
+                      placeholder="IP To"
+                      style={{ width: 160, padding: "8px 10px", border: "2px solid #e0e0e0", borderRadius: 2, fontSize: 12, fontFamily: "'Montserrat', monospace", boxSizing: "border-box" }}
                     />
                     <button
                       onClick={() => setOfficeIPs(officeIPs.filter((_, i) => i !== idx))}
@@ -1314,7 +1339,7 @@ function Dashboard({ user, onLogout }) {
                   </div>
                 ))}
                 <button
-                  onClick={() => setOfficeIPs([...officeIPs, { label: "", ip: "" }])}
+                  onClick={() => setOfficeIPs([...officeIPs, { label: "", ipFrom: "", ipTo: "" }])}
                   style={{ alignSelf: "flex-start", padding: "6px 16px", background: "transparent", border: `1px dashed ${BRAND.indigo}`, borderRadius: 2, fontSize: 11, fontFamily: "'Montserrat', sans-serif", fontWeight: 600, color: BRAND.indigo, cursor: "pointer", textTransform: "uppercase", letterSpacing: 1 }}
                 >
                   + Add IP
@@ -1800,9 +1825,9 @@ function Dashboard({ user, onLogout }) {
                   setScheduleLookup(null);
                   setPreprocessSummary(null);
                   setOfficeIPs([
-                    { label: "EST", ip: "116.50.227.176" },
-                    { label: "ComClark", ip: "161.49.192.112" },
-                    { label: "ComClark 7F", ip: "136.239.243.241" },
+                    { label: "EST", ipFrom: "116.50.227.176", ipTo: "116.50.227.181" },
+                    { label: "ComClark", ipFrom: "161.49.192.112", ipTo: "161.49.192.116" },
+                    { label: "ComClark 7F", ipFrom: "136.239.243.241", ipTo: "136.239.243.246" },
                   ]);
                 }}
                 style={{
