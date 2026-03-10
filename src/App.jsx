@@ -189,28 +189,65 @@ function extractIPFromNotes(notes) {
   return match ? match[1] : "";
 }
 
-// ─── Utility: Parse schedule text into day-by-day object ───
-function parseScheduleText(scheduleStr) {
-  if (!scheduleStr) return {};
-  const result = {};
-  const lines = String(scheduleStr).split(/\n|\r\n?/).map((l) => l.trim()).filter(Boolean);
-  for (const line of lines) {
-    const colonIdx = line.indexOf(":");
-    if (colonIdx === -1) continue;
-    const dayName = line.slice(0, colonIdx).trim();
-    const rest = line.slice(colonIdx + 1).trim().toLowerCase();
-    if (rest.includes("rest day") || rest === "rest" || rest === "off") {
-      result[dayName] = { restDay: true };
-    } else {
-      const timeParts = line.slice(colonIdx + 1).trim().match(/(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)/i);
-      if (timeParts) {
-        result[dayName] = { start: timeParts[1].trim(), end: timeParts[2].trim() };
-      } else {
-        result[dayName] = { raw: line.slice(colonIdx + 1).trim() };
-      }
-    }
-  }
-  return result;
+// ─── Utility: Parse Work Schedule Tracker Excel (multi-sheet monthly format) ───
+async function parseScheduleExcel(file) {
+  const XLSX = await import("xlsx");
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: "array" });
+        const result = {};
+        const monthsParsed = [];
+
+        const monthNames = ["JANUARY","FEBRUARY","MARCH","APRIL","MAY","JUNE","JULY","AUGUST","SEPTEMBER","OCTOBER","NOVEMBER","DECEMBER"];
+
+        for (const sheetName of wb.SheetNames) {
+          const match = sheetName.match(/^(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{4})$/i);
+          if (!match) continue;
+
+          const monthIndex = monthNames.indexOf(match[1].toUpperCase());
+          const year = parseInt(match[2]);
+          monthsParsed.push(sheetName);
+
+          const ws = wb.Sheets[sheetName];
+          const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+
+          for (let r = 10; r < allRows.length; r++) {
+            const row = allRows[r];
+            const employeeName = String(row[8] || "").trim(); // Column I
+            if (!employeeName) continue;
+
+            const workSetup = String(row[0] || "").trim();
+            const client = String(row[7] || "").trim();
+            const tbrId = String(row[9] || "").trim();
+            const normKey = employeeName.toLowerCase().replace(/[^a-z\s]/g, "").replace(/\s+/g, " ").trim();
+
+            if (!result[normKey]) {
+              result[normKey] = { fullName: employeeName, workSetup, client, tbrId, days: {} };
+            }
+
+            const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+            for (let dayCol = 11; dayCol <= 41; dayCol++) {
+              const dayNum = dayCol - 10;
+              if (dayNum > daysInMonth) break;
+
+              const cellValue = String(row[dayCol] || "").trim().toUpperCase();
+              if (cellValue) {
+                const dateISO = `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(dayNum).padStart(2, "0")}`;
+                result[normKey].days[dateISO] = cellValue;
+              }
+            }
+          }
+        }
+
+        result._meta = { monthsParsed, employeeCount: Object.keys(result).filter(k => k !== "_meta").length };
+        resolve(result);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
 }
 
 // ─── Utility: Fuzzy name match ───
@@ -286,20 +323,17 @@ function preprocessSproutData(rawData, columnMap) {
   return results;
 }
 
-// ─── Utility: Build schedule lookup from schedule report ───
-function buildScheduleLookup(rawData, columnMap) {
-  const lookup = {};
-  for (const row of rawData) {
-    const fullName = (row[columnMap.employeeName] || "").trim();
-    if (!fullName) continue;
-    const location = (row[columnMap.location] || "").trim();
-    const scheduleText = row[columnMap.schedule] || "";
-    const schedule = parseScheduleText(scheduleText);
-    const normKey = fullName.toLowerCase().replace(/[^a-z\s]/g, "").replace(/\s+/g, " ").trim();
-    lookup[normKey] = { fullName, location, schedule };
-  }
-  return lookup;
-}
+// ─── Status code labels for display ───
+const STATUS_CODE_LABELS = {
+  O: "Onsite",
+  WFH: "Work From Home",
+  OB: "Official Business",
+  OW: "Official Work",
+  V: "Vacation",
+  H: "Holiday",
+  LP: "Leave w/ Pay",
+  SE: "Sick/Emergency Leave",
+};
 
 // ─── Utility: Check if IP falls within an office IP range ───
 function ipInRange(ip, ipFrom, ipTo) {
@@ -652,11 +686,11 @@ function FileUploadZone({ label, description, onFileLoad, accepted, fileLoaded }
     const ext = file.name.split(".").pop().toLowerCase();
     if (["xlsx", "xls"].includes(ext)) {
       const data = await parseExcel(file);
-      onFileLoad(data, file.name);
+      onFileLoad(data, file.name, file);
     } else if (["csv", "tsv"].includes(ext)) {
       const text = await file.text();
       const data = parseCSV(text);
-      onFileLoad(data, file.name);
+      onFileLoad(data, file.name, file);
     }
   };
 
@@ -763,11 +797,9 @@ function runComparison(processedSprout, scheduleLookup, officeIPs, ipGeoCache = 
 
     // Fuzzy-match employee to schedule
     let schedEntry = null;
-    let matchedKey = null;
     for (const key of schedKeys) {
       if (fuzzyNameMatch(employeeName, scheduleLookup[key].fullName)) {
         schedEntry = scheduleLookup[key];
-        matchedKey = key;
         break;
       }
     }
@@ -785,9 +817,8 @@ function runComparison(processedSprout, scheduleLookup, officeIPs, ipGeoCache = 
       ? [resolvedIn.city, resolvedIn.region, resolvedIn.country].filter(Boolean).join(", ")
       : "";
 
-    // Get scheduled info for this day
-    let scheduledLocation = "—";
-    let scheduledHours = "—";
+    let workSetup = "—";
+    let scheduledStatus = "—";
     const discrepancies = [];
     let status = "Match";
 
@@ -795,38 +826,42 @@ function runComparison(processedSprout, scheduleLookup, officeIPs, ipGeoCache = 
       discrepancies.push("No schedule found for this employee");
       status = "Mismatch";
     } else {
-      scheduledLocation = schedEntry.location || "—";
-      const daySched = schedEntry.schedule[dayOfWeek];
+      workSetup = schedEntry.workSetup || "—";
+      const code = (schedEntry.days[date] || "").toUpperCase();
 
-      if (!daySched) {
-        scheduledHours = "No schedule for " + dayOfWeek;
-      } else if (daySched.restDay) {
-        scheduledHours = "Rest Day";
-        // Rest day violation: employee clocked in on rest day
+      if (!code) {
+        // No schedule entry = rest day
+        scheduledStatus = "Rest Day";
         if (clockIn || clockOut) {
-          discrepancies.push("Clocked in on a scheduled Rest Day");
+          discrepancies.push("Clocked in on a Rest Day");
         }
-      } else {
-        scheduledHours = daySched.start && daySched.end ? `${daySched.start} - ${daySched.end}` : daySched.raw || "—";
-      }
-
-      // IP location check against scheduled location
-      const locLower = scheduledLocation.toLowerCase();
-      const isHeadOffice = locLower.includes("head office") || locLower.includes("company") || locLower.includes("onsite") || locLower.includes("office");
-      const isWFH = locLower.includes("home") || locLower.includes("wfh") || locLower.includes("remote");
-      const isHybrid = locLower.includes("hybrid");
-
-      if (ipIn && !isHybrid) {
-        const ipIsOffice = isOfficeIP(ipIn, officeIPs);
-        if (isHeadOffice && !ipIsOffice) {
-          discrepancies.push(`Scheduled at Office but IP (${ipIn}) is not a known office IP`);
+      } else if (["V", "H", "LP", "SE"].includes(code)) {
+        // Leave / Holiday — flag if clocked in
+        scheduledStatus = STATUS_CODE_LABELS[code] || code;
+        if (clockIn || clockOut) {
+          discrepancies.push(`Clocked in while on ${STATUS_CODE_LABELS[code] || code}`);
         }
-        if (isWFH && ipIsOffice) {
+      } else if (["OB", "OW"].includes(code)) {
+        // Official business — treat as working, no IP check needed
+        scheduledStatus = STATUS_CODE_LABELS[code] || code;
+      } else if (code === "O") {
+        // Onsite — IP must match office
+        scheduledStatus = "Onsite";
+        if (ipIn && !isOfficeIP(ipIn, officeIPs)) {
+          discrepancies.push(`Scheduled Onsite but IP (${ipIn}) is not a known office IP`);
+        }
+      } else if (code === "WFH") {
+        // Work from home — IP should NOT be office
+        scheduledStatus = "WFH";
+        if (ipIn && isOfficeIP(ipIn, officeIPs)) {
           discrepancies.push(`Scheduled WFH but IP (${ipIn}) is a known office IP`);
         }
+      } else {
+        // Unknown code — just display it
+        scheduledStatus = code;
       }
 
-      // Clock-out IP differs from clock-in IP
+      // Clock-out IP differs from clock-in IP (different location types)
       if (ipIn && ipOut && ipIn !== ipOut) {
         const outIsOffice = isOfficeIP(ipOut, officeIPs);
         const inIsOffice = isOfficeIP(ipIn, officeIPs);
@@ -848,8 +883,8 @@ function runComparison(processedSprout, scheduleLookup, officeIPs, ipGeoCache = 
       ipOut: ipOut || "—",
       ipLocation,
       resolvedLocation: resolvedLocation || "—",
-      scheduledLocation,
-      scheduledHours,
+      workSetup,
+      scheduledStatus,
       auditStatus: status,
       discrepancies: discrepancies.join("; ") || "—",
     });
@@ -886,13 +921,10 @@ function StatusBadge({ status }) {
 // ─── Main Dashboard ───
 function Dashboard({ user, onLogout }) {
   const [sproutData, setSproutData] = useState(null);
-  const [scheduleData, setScheduleData] = useState(null);
   const [sproutFile, setSproutFile] = useState("");
   const [scheduleFile, setScheduleFile] = useState("");
   const [sproutCols, setSproutCols] = useState([]);
-  const [scheduleCols, setScheduleCols] = useState([]);
   const [sproutMap, setSproutMap] = useState({});
-  const [scheduleMap, setScheduleMap] = useState({});
   const [results, setResults] = useState(null);
   const [filter, setFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
@@ -919,12 +951,6 @@ function Dashboard({ user, onLogout }) {
     { key: "notes", label: "Notes / IP Source", required: true },
   ];
 
-  const scheduleFields = [
-    { key: "employeeName", label: "Employee Name", required: true },
-    { key: "location", label: "Location", required: true },
-    { key: "schedule", label: "Schedule", required: true },
-  ];
-
   const autoMap = (columns, fields) => {
     const map = {};
     fields.forEach((f) => {
@@ -935,8 +961,6 @@ function Dashboard({ user, onLogout }) {
         if (f.key === "logTime") return col.includes("logtime") || col.includes("logtim");
         if (f.key === "inOutMode") return col.includes("inout") || col.includes("inoutmode");
         if (f.key === "notes") return col.includes("notes") || col.includes("note");
-        if (f.key === "location") return col === "location";
-        if (f.key === "schedule") return col === "schedule" || col.includes("schedule");
         return col.includes(nc(f.key)) || col.includes(nc(f.label.split("(")[0].trim()));
       });
       if (match) map[f.key] = match;
@@ -952,12 +976,17 @@ function Dashboard({ user, onLogout }) {
     setSproutMap(autoMap(cols, sproutFields));
   };
 
-  const handleScheduleLoad = (data, name) => {
-    setScheduleData(data);
-    setScheduleFile(name);
-    const cols = Object.keys(data[0] || {});
-    setScheduleCols(cols);
-    setScheduleMap(autoMap(cols, scheduleFields));
+  const handleScheduleFile = async (file) => {
+    try {
+      const lookup = await parseScheduleExcel(file);
+      const meta = lookup._meta || { monthsParsed: [], employeeCount: 0 };
+      delete lookup._meta;
+      setScheduleLookup(lookup);
+      setScheduleFile(file.name);
+      setPreprocessSummary((prev) => prev ? { ...prev, scheduleEmployees: meta.employeeCount, scheduleMonths: meta.monthsParsed } : null);
+    } catch (err) {
+      console.error("Failed to parse schedule file:", err);
+    }
   };
 
   const handleResolveIPs = () => {
@@ -995,19 +1024,15 @@ function Dashboard({ user, onLogout }) {
     );
   };
 
-  const canProceedToMap = sproutData && scheduleData;
+  const canProceedToMap = sproutData && scheduleLookup;
   const canRunComparison = processedSprout && processedSprout.length > 0 && scheduleLookup;
 
   const handlePreprocess = () => {
-    if (!sproutData || !scheduleData) return;
+    if (!sproutData || !scheduleLookup) return;
     if (!sproutMap.employeeName || !sproutMap.logTime || !sproutMap.inOutMode || !sproutMap.notes) return;
-    if (!scheduleMap.employeeName || !scheduleMap.location || !scheduleMap.schedule) return;
 
     const processed = preprocessSproutData(sproutData, sproutMap);
-    const lookup = buildScheduleLookup(scheduleData, scheduleMap);
-
     setProcessedSprout(processed);
-    setScheduleLookup(lookup);
 
     const uniqueEmployees = new Set(processed.map((r) => r.employeeName));
     const uniqueDates = new Set(processed.map((r) => r.date));
@@ -1015,7 +1040,7 @@ function Dashboard({ user, onLogout }) {
       records: processed.length,
       employees: uniqueEmployees.size,
       dates: uniqueDates.size,
-      scheduleEmployees: Object.keys(lookup).length,
+      scheduleEmployees: Object.keys(scheduleLookup).length,
     });
   };
 
@@ -1060,8 +1085,8 @@ function Dashboard({ user, onLogout }) {
         "IP (Out)": r.ipOut,
         "IP Location": r.ipLocation,
         "Resolved Location": r.resolvedLocation,
-        "Scheduled Location": r.scheduledLocation,
-        "Scheduled Hours": r.scheduledHours,
+        "Work Setup": r.workSetup,
+        "Scheduled Status": r.scheduledStatus,
         "Audit Status": r.auditStatus,
         "Discrepancies": r.discrepancies,
       }));
@@ -1206,16 +1231,16 @@ function Dashboard({ user, onLogout }) {
               </div>
               <div>
                 <FileUploadZone
-                  label="Employee Schedule"
-                  description="Drop .xlsx, .xls, or .csv file here"
-                  accepted=".xlsx,.xls,.csv,.tsv"
-                  onFileLoad={handleScheduleLoad}
+                  label="Work Schedule Tracker"
+                  description="Drop the monthly schedule .xlsx file here"
+                  accepted=".xlsx,.xls"
+                  onFileLoad={(_, name, file) => handleScheduleFile(file)}
                   fileLoaded={scheduleFile}
                 />
-                {scheduleData && (
+                {scheduleLookup && (
                   <div style={{ marginTop: 12, padding: "12px 16px", background: "#f0f0f0", borderRadius: 2 }}>
                     <span style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 12, color: "#666" }}>
-                      <strong>{scheduleData.length}</strong> records loaded from <strong>{scheduleFile}</strong>
+                      <strong>{Object.keys(scheduleLookup).length}</strong> employees loaded from <strong>{scheduleFile}</strong>
                     </span>
                   </div>
                 )}
@@ -1257,25 +1282,28 @@ function Dashboard({ user, onLogout }) {
               Map Columns
             </h2>
             <p style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 300, fontSize: 14, color: "#888", margin: "0 0 32px" }}>
-              Match the columns from your files to the required fields. We've auto-detected what we can.
+              Match the Sprout payroll columns to the required fields. Schedule data is auto-parsed from the tracker file.
             </p>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-              <ColumnMapper
-                title="Sprout Payroll"
-                columns={sproutCols}
-                mapping={sproutMap}
-                onMap={setSproutMap}
-                requiredFields={sproutFields}
-              />
-              <ColumnMapper
-                title="Employee Schedule"
-                columns={scheduleCols}
-                mapping={scheduleMap}
-                onMap={setScheduleMap}
-                requiredFields={scheduleFields}
-              />
-            </div>
+            <ColumnMapper
+              title="Sprout Payroll"
+              columns={sproutCols}
+              mapping={sproutMap}
+              onMap={setSproutMap}
+              requiredFields={sproutFields}
+            />
+
+            {/* Schedule Summary */}
+            {scheduleLookup && (
+              <div style={{ background: "rgba(52,37,107,0.04)", borderRadius: 2, padding: "16px 20px", marginTop: 16, border: `1px solid ${BRAND.indigo}` }}>
+                <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 12, color: BRAND.indigo, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 8 }}>
+                  Schedule Data (Auto-Parsed)
+                </div>
+                <div style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 13, color: BRAND.indigo }}>
+                  <strong>{Object.keys(scheduleLookup).length}</strong> employees loaded from <strong>{scheduleFile}</strong>
+                </div>
+              </div>
+            )}
 
             {/* Office IP Configuration */}
             <div
@@ -1348,7 +1376,7 @@ function Dashboard({ user, onLogout }) {
             </div>
 
             {/* Pre-process Data Button */}
-            {sproutMap.employeeName && sproutMap.logTime && sproutMap.inOutMode && sproutMap.notes && scheduleMap.employeeName && scheduleMap.location && scheduleMap.schedule && (
+            {sproutMap.employeeName && sproutMap.logTime && sproutMap.inOutMode && sproutMap.notes && scheduleLookup && (
               <div style={{ marginTop: 24 }}>
                 <button
                   onClick={handlePreprocess}
@@ -1722,7 +1750,7 @@ function Dashboard({ user, onLogout }) {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "'Montserrat', sans-serif" }}>
                   <thead>
                     <tr style={{ background: BRAND.indigo }}>
-                      {["Employee", "Date", "Day", "Clock In", "Clock Out", "IP (In)", "IP Location", "Resolved Loc.", "Sched. Location", "Sched. Hours", "Status", "Discrepancies"].map(
+                      {["Employee", "Date", "Day", "Clock In", "Clock Out", "IP (In)", "IP Location", "Resolved Loc.", "Work Setup", "Sched. Status", "Status", "Discrepancies"].map(
                         (h) => (
                           <th
                             key={h}
@@ -1778,8 +1806,8 @@ function Dashboard({ user, onLogout }) {
                             {r.ipLocation}
                           </td>
                           <td style={{ padding: "10px 14px", fontSize: 11, color: r.resolvedLocation !== "—" ? BRAND.indigo : "#ccc" }}>{r.resolvedLocation}</td>
-                          <td style={{ padding: "10px 14px", fontSize: 11 }}>{r.scheduledLocation}</td>
-                          <td style={{ padding: "10px 14px", fontSize: 11, fontFamily: "monospace" }}>{r.scheduledHours}</td>
+                          <td style={{ padding: "10px 14px", fontSize: 11 }}>{r.workSetup}</td>
+                          <td style={{ padding: "10px 14px", fontSize: 11, fontWeight: 600 }}>{r.scheduledStatus}</td>
                           <td style={{ padding: "10px 14px" }}>
                             <StatusBadge status={r.auditStatus} />
                           </td>
@@ -1809,11 +1837,9 @@ function Dashboard({ user, onLogout }) {
                   setResults(null);
                   setStep(1);
                   setSproutData(null);
-                  setScheduleData(null);
                   setSproutFile("");
                   setScheduleFile("");
                   setSproutMap({});
-                  setScheduleMap({});
                   setFilter("all");
                   setSearchTerm("");
                   setDateFilter("");
