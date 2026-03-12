@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 
 // ─── Brand Constants from Brand Bible ───
 const BRAND = {
@@ -943,6 +943,11 @@ function Dashboard({ user, onLogout }) {
     { label: "ComClark 7F", ipFrom: "136.239.243.241", ipTo: "136.239.243.246" },
   ]);
   const [preprocessSummary, setPreprocessSummary] = useState(null);
+  const [expandedEmployees, setExpandedEmployees] = useState(new Set());
+  const [allExpanded, setAllExpanded] = useState(false);
+  const [pageSize, setPageSize] = useState(25);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [innerSortConfig, setInnerSortConfig] = useState({ key: "date", direction: "asc" });
 
   const sproutFields = [
     { key: "employeeName", label: "Employee Name", required: true },
@@ -1051,6 +1056,13 @@ function Dashboard({ user, onLogout }) {
       setResults(res);
       setStep(3);
       setProcessing(false);
+      // Auto-expand employees with mismatches
+      const mismatchEmployees = new Set(
+        res.filter(r => r.auditStatus === "Mismatch").map(r => r.employeeName)
+      );
+      setExpandedEmployees(mismatchEmployees);
+      setAllExpanded(false);
+      setCurrentPage(1);
     }, 1200);
   };
 
@@ -1058,12 +1070,14 @@ function Dashboard({ user, onLogout }) {
     ? results.filter((r) => {
         const matchFilter = filter === "all" || (filter === "match" && r.auditStatus === "Match") || (filter === "mismatch" && r.auditStatus === "Mismatch");
         const matchSearch = !searchTerm || r.employeeName.toLowerCase().includes(searchTerm.toLowerCase());
-        const matchDate = !dateFilter || r.date.includes(dateFilter);
+        const matchDate = !dateFilter || r.date === dateFilter;
         return matchFilter && matchSearch && matchDate;
       })
     : [];
 
-  const stats = results
+  const filtersActive = filter !== "all" || searchTerm !== "" || dateFilter !== "";
+
+  const totalStats = results
     ? {
         total: results.length,
         matches: results.filter((r) => r.auditStatus === "Match").length,
@@ -1072,6 +1086,70 @@ function Dashboard({ user, onLogout }) {
         remoteIPs: results.filter((r) => r.ipLocation === "Remote").length,
       }
     : null;
+
+  const stats = useMemo(() => ({
+    total: filteredResults.length,
+    matches: filteredResults.filter((r) => r.auditStatus === "Match").length,
+    mismatches: filteredResults.filter((r) => r.auditStatus === "Mismatch").length,
+    officeIPs: filteredResults.filter((r) => r.ipLocation && r.ipLocation.startsWith("Office")).length,
+    remoteIPs: filteredResults.filter((r) => r.ipLocation === "Remote").length,
+  }), [filteredResults]);
+
+  const groupedResults = useMemo(() => {
+    const groups = {};
+    for (const row of filteredResults) {
+      if (!groups[row.employeeName]) groups[row.employeeName] = [];
+      groups[row.employeeName].push(row);
+    }
+    return Object.entries(groups)
+      .map(([name, rows]) => ({
+        employeeName: name,
+        rows: rows.sort((a, b) => a.date.localeCompare(b.date)),
+        totalDays: rows.length,
+        mismatches: rows.filter(r => r.auditStatus === "Mismatch").length,
+        workSetup: rows[0]?.workSetup || "—",
+        hasDiscrepancies: rows.some(r => r.auditStatus === "Mismatch"),
+      }))
+      .sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+  }, [filteredResults]);
+
+  const totalGroupPages = pageSize === "all" ? 1 : Math.ceil(groupedResults.length / pageSize);
+  const paginatedGroups = pageSize === "all"
+    ? groupedResults
+    : groupedResults.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  const toggleEmployee = (name) => {
+    setExpandedEmployees(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const toggleAllExpanded = () => {
+    if (allExpanded) {
+      setExpandedEmployees(new Set());
+      setAllExpanded(false);
+    } else {
+      setExpandedEmployees(new Set(paginatedGroups.map(g => g.employeeName)));
+      setAllExpanded(true);
+    }
+  };
+
+  const SUB_TABLE_COLUMNS = [
+    { key: "date", label: "Date" },
+    { key: "dayOfWeek", label: "Day" },
+    { key: "clockIn", label: "Clock In" },
+    { key: "clockOut", label: "Clock Out" },
+    { key: "ipIn", label: "IP (In)" },
+    { key: "ipLocation", label: "IP Location" },
+    { key: "resolvedLocation", label: "Resolved Loc." },
+    { key: "workSetup", label: "Work Setup" },
+    { key: "scheduledStatus", label: "Sched. Status" },
+    { key: "auditStatus", label: "Status" },
+    { key: "discrepancies", label: "Discrepancies" },
+  ];
 
   const handleExport = () => {
     if (filteredResults.length > 0) {
@@ -1590,20 +1668,23 @@ function Dashboard({ user, onLogout }) {
               <div style={{ background: BRAND.white, borderRadius: 2, padding: 24, borderLeft: `4px solid ${BRAND.indigo}`, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
                 <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 300, fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 1.5 }}>Total Records</div>
                 <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 900, fontSize: 36, color: BRAND.indigo, marginTop: 4 }}>{stats.total}</div>
+                {filtersActive && totalStats && <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 400, fontSize: 11, color: "#999", marginTop: 2 }}>of {totalStats.total} total</div>}
               </div>
               <div style={{ background: BRAND.white, borderRadius: 2, padding: 24, borderLeft: `4px solid ${BRAND.canary}`, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
                 <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 300, fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 1.5 }}>Matches</div>
                 <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 900, fontSize: 36, color: BRAND.indigo, marginTop: 4 }}>
                   {stats.matches}
-                  <span style={{ fontSize: 14, fontWeight: 400, color: "#999", marginLeft: 8 }}>({((stats.matches / stats.total) * 100).toFixed(1)}%)</span>
+                  <span style={{ fontSize: 14, fontWeight: 400, color: "#999", marginLeft: 8 }}>({stats.total > 0 ? ((stats.matches / stats.total) * 100).toFixed(1) : 0}%)</span>
                 </div>
+                {filtersActive && totalStats && <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 400, fontSize: 11, color: "#999", marginTop: 2 }}>of {totalStats.matches} total</div>}
               </div>
               <div style={{ background: BRAND.white, borderRadius: 2, padding: 24, borderLeft: `4px solid ${BRAND.chilli}`, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
                 <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 300, fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 1.5 }}>Mismatches</div>
                 <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 900, fontSize: 36, color: BRAND.chilli, marginTop: 4 }}>
                   {stats.mismatches}
-                  <span style={{ fontSize: 14, fontWeight: 400, color: "#999", marginLeft: 8 }}>({((stats.mismatches / stats.total) * 100).toFixed(1)}%)</span>
+                  <span style={{ fontSize: 14, fontWeight: 400, color: "#999", marginLeft: 8 }}>({stats.total > 0 ? ((stats.mismatches / stats.total) * 100).toFixed(1) : 0}%)</span>
                 </div>
+                {filtersActive && totalStats && <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 400, fontSize: 11, color: "#999", marginTop: 2 }}>of {totalStats.mismatches} total</div>}
               </div>
               <div style={{ background: BRAND.white, borderRadius: 2, padding: 24, borderLeft: `4px solid ${BRAND.flamingo}`, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
                 <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 300, fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 1.5 }}>IP Location</div>
@@ -1637,7 +1718,7 @@ function Dashboard({ user, onLogout }) {
                 ].map((f) => (
                   <button
                     key={f.key}
-                    onClick={() => setFilter(f.key)}
+                    onClick={() => { setFilter(f.key); setCurrentPage(1); }}
                     style={{
                       padding: "8px 16px",
                       background: filter === f.key ? BRAND.indigo : "transparent",
@@ -1658,11 +1739,34 @@ function Dashboard({ user, onLogout }) {
                 ))}
               </div>
 
+              <button
+                onClick={toggleAllExpanded}
+                style={{
+                  padding: "8px 16px",
+                  background: "transparent",
+                  color: BRAND.indigo,
+                  border: `1px solid ${BRAND.indigo}`,
+                  borderRadius: 2,
+                  fontSize: 11,
+                  fontFamily: "'Montserrat', sans-serif",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: 1,
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                {allExpanded ? "Collapse All" : "Expand All"}
+              </button>
+
               <input
                 type="text"
                 placeholder="Search employee..."
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
+                onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
                 style={{
                   padding: "8px 14px",
                   border: "2px solid #e0e0e0",
@@ -1679,7 +1783,7 @@ function Dashboard({ user, onLogout }) {
               <input
                 type="date"
                 value={dateFilter}
-                onChange={(e) => setDateFilter(e.target.value)}
+                onChange={(e) => { setDateFilter(e.target.value); setCurrentPage(1); }}
                 style={{
                   padding: "8px 14px",
                   border: "2px solid #e0e0e0",
@@ -1693,7 +1797,7 @@ function Dashboard({ user, onLogout }) {
               <div style={{ flex: 1 }} />
 
               <span style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 12, color: "#999" }}>
-                Showing {filteredResults.length} of {results.length}
+                {groupedResults.length} employees · {filteredResults.length} records
               </span>
 
               <button
@@ -1718,7 +1822,7 @@ function Dashboard({ user, onLogout }) {
                 onMouseEnter={(e) => (e.target.style.background = BRAND.canaryLight)}
                 onMouseLeave={(e) => (e.target.style.background = BRAND.canary)}
               >
-                ↓ Export Excel
+                Export Excel
               </button>
 
               <button
@@ -1740,94 +1844,248 @@ function Dashboard({ user, onLogout }) {
                   gap: 6,
                 }}
               >
-                ⎙ Print
+                Print
               </button>
             </div>
 
-            {/* Results Table */}
+            {/* Employee Accordion */}
             <div style={{ background: BRAND.white, borderRadius: 2, overflow: "hidden", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "'Montserrat', sans-serif" }}>
-                  <thead>
-                    <tr style={{ background: BRAND.indigo }}>
-                      {["Employee", "Date", "Day", "Clock In", "Clock Out", "IP (In)", "IP Location", "Resolved Loc.", "Work Setup", "Sched. Status", "Status", "Discrepancies"].map(
-                        (h) => (
-                          <th
-                            key={h}
-                            style={{
-                              padding: "12px 14px",
-                              textAlign: "left",
-                              fontWeight: 700,
-                              fontSize: 10,
-                              color: BRAND.white,
-                              textTransform: "uppercase",
-                              letterSpacing: 1.5,
-                              whiteSpace: "nowrap",
-                              borderBottom: `2px solid ${BRAND.canary}`,
-                            }}
-                          >
-                            {h}
-                          </th>
-                        )
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredResults.length === 0 ? (
-                      <tr>
-                        <td colSpan={12} style={{ padding: 40, textAlign: "center", color: "#999" }}>
-                          No records match your filters.
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredResults.map((r, i) => (
-                        <tr
-                          key={i}
-                          style={{
-                            background: i % 2 === 0 ? BRAND.white : "#fafafa",
-                            borderBottom: "1px solid #f0f0f0",
-                            transition: "background 0.15s",
-                          }}
-                          onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(245,206,0,0.06)")}
-                          onMouseLeave={(e) => (e.currentTarget.style.background = i % 2 === 0 ? BRAND.white : "#fafafa")}
-                        >
-                          <td style={{ padding: "10px 14px", fontWeight: 600, whiteSpace: "nowrap" }}>{r.employeeName}</td>
-                          <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>{r.date}</td>
-                          <td style={{ padding: "10px 14px", whiteSpace: "nowrap", fontSize: 11 }}>{r.dayOfWeek ? r.dayOfWeek.slice(0, 3) : "—"}</td>
-                          <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 11 }}>{r.clockIn}</td>
-                          <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 11 }}>{r.clockOut}</td>
-                          <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 11 }}>{r.ipIn}</td>
-                          <td style={{
-                            padding: "10px 14px",
-                            fontSize: 11,
-                            fontWeight: 600,
-                            color: r.ipLocation.startsWith("Office") ? "#16a34a" : r.ipLocation === "Remote" ? "#2563eb" : "#999",
-                          }}>
-                            {r.ipLocation}
-                          </td>
-                          <td style={{ padding: "10px 14px", fontSize: 11, color: r.resolvedLocation !== "—" ? BRAND.indigo : "#ccc" }}>{r.resolvedLocation}</td>
-                          <td style={{ padding: "10px 14px", fontSize: 11 }}>{r.workSetup}</td>
-                          <td style={{ padding: "10px 14px", fontSize: 11, fontWeight: 600 }}>{r.scheduledStatus}</td>
-                          <td style={{ padding: "10px 14px" }}>
-                            <StatusBadge status={r.auditStatus} />
-                          </td>
-                          <td
-                            style={{
-                              padding: "10px 14px",
-                              fontSize: 11,
-                              color: r.auditStatus === "Mismatch" ? BRAND.chilli : "#999",
-                              maxWidth: 300,
-                              lineHeight: 1.4,
-                            }}
-                          >
-                            {r.discrepancies}
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+              {paginatedGroups.length === 0 ? (
+                <div style={{ padding: 40, textAlign: "center", color: "#999", fontFamily: "'Montserrat', sans-serif" }}>
+                  No records match your filters.
+                </div>
+              ) : (
+                paginatedGroups.map((group) => {
+                  const isExpanded = expandedEmployees.has(group.employeeName);
+                  const sortedRows = [...group.rows].sort((a, b) => {
+                    const dir = innerSortConfig.direction === "asc" ? 1 : -1;
+                    const valA = a[innerSortConfig.key] || "";
+                    const valB = b[innerSortConfig.key] || "";
+                    return dir * String(valA).localeCompare(String(valB));
+                  });
+
+                  return (
+                    <div key={group.employeeName}>
+                      {/* Employee Header Row */}
+                      <div
+                        onClick={() => toggleEmployee(group.employeeName)}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 16,
+                          padding: "14px 20px",
+                          background: isExpanded ? "rgba(52,37,107,0.04)" : BRAND.white,
+                          borderBottom: "1px solid #f0f0f0",
+                          cursor: "pointer",
+                          transition: "background 0.15s",
+                          userSelect: "none",
+                        }}
+                        onMouseEnter={(e) => { if (!isExpanded) e.currentTarget.style.background = "rgba(245,206,0,0.06)"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = isExpanded ? "rgba(52,37,107,0.04)" : BRAND.white; }}
+                      >
+                        {/* Chevron */}
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={BRAND.indigo} strokeWidth="2.5"
+                          style={{ transition: "transform 0.2s", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", flexShrink: 0 }}>
+                          <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+
+                        {/* Employee Name */}
+                        <span style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 13, color: BRAND.black, minWidth: 200 }}>
+                          {group.employeeName}
+                        </span>
+
+                        {/* Days count */}
+                        <span style={{ padding: "3px 10px", borderRadius: 2, background: "rgba(52,37,107,0.08)", color: BRAND.indigo, fontSize: 11, fontWeight: 600, fontFamily: "'Montserrat', sans-serif", whiteSpace: "nowrap" }}>
+                          {group.totalDays} {group.totalDays === 1 ? "day" : "days"}
+                        </span>
+
+                        {/* Mismatches badge */}
+                        {group.mismatches > 0 && (
+                          <span style={{ padding: "3px 10px", borderRadius: 2, background: "rgba(221,60,39,0.08)", color: BRAND.chilli, fontSize: 11, fontWeight: 700, fontFamily: "'Montserrat', sans-serif", whiteSpace: "nowrap" }}>
+                            {group.mismatches} mismatch{group.mismatches !== 1 ? "es" : ""}
+                          </span>
+                        )}
+
+                        {/* Work Setup */}
+                        <span style={{ fontSize: 11, color: "#888", fontFamily: "'Montserrat', sans-serif", whiteSpace: "nowrap" }}>
+                          {group.workSetup}
+                        </span>
+
+                        <div style={{ flex: 1 }} />
+
+                        {/* Status indicator */}
+                        {group.hasDiscrepancies ? (
+                          <span style={{ color: BRAND.chilli, fontSize: 16, fontWeight: 700 }}>!</span>
+                        ) : (
+                          <span style={{ color: "#16a34a", fontSize: 14 }}>&#x2713;</span>
+                        )}
+                      </div>
+
+                      {/* Expanded Sub-Table */}
+                      <div
+                        data-accordion-body=""
+                        style={{
+                          maxHeight: isExpanded ? `${sortedRows.length * 42 + 44}px` : "0px",
+                          overflow: "hidden",
+                          transition: "max-height 0.25s ease-in-out",
+                        }}
+                      >
+                        <div style={{ overflowX: "auto", borderBottom: isExpanded ? `2px solid ${BRAND.indigo}` : "none" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "'Montserrat', sans-serif" }}>
+                            <thead>
+                              <tr style={{ background: "rgba(52,37,107,0.85)" }}>
+                                {SUB_TABLE_COLUMNS.map((col) => (
+                                  <th
+                                    key={col.key}
+                                    onClick={() => {
+                                      setInnerSortConfig(prev =>
+                                        prev.key === col.key
+                                          ? { key: col.key, direction: prev.direction === "asc" ? "desc" : "asc" }
+                                          : { key: col.key, direction: "asc" }
+                                      );
+                                    }}
+                                    style={{
+                                      padding: "10px 14px",
+                                      textAlign: "left",
+                                      fontWeight: 700,
+                                      fontSize: 10,
+                                      color: BRAND.white,
+                                      textTransform: "uppercase",
+                                      letterSpacing: 1.5,
+                                      whiteSpace: "nowrap",
+                                      borderBottom: `2px solid ${BRAND.canary}`,
+                                      cursor: "pointer",
+                                      userSelect: "none",
+                                    }}
+                                  >
+                                    {col.label}
+                                    {innerSortConfig.key === col.key && (
+                                      <span style={{ marginLeft: 4, fontSize: 9 }}>
+                                        {innerSortConfig.direction === "asc" ? "▲" : "▼"}
+                                      </span>
+                                    )}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sortedRows.map((r, i) => (
+                                <tr
+                                  key={i}
+                                  style={{
+                                    background: i % 2 === 0 ? BRAND.white : "#fafafa",
+                                    borderBottom: "1px solid #f0f0f0",
+                                    transition: "background 0.15s",
+                                  }}
+                                  onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(245,206,0,0.06)")}
+                                  onMouseLeave={(e) => (e.currentTarget.style.background = i % 2 === 0 ? BRAND.white : "#fafafa")}
+                                >
+                                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>{r.date}</td>
+                                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap", fontSize: 11 }}>{r.dayOfWeek ? r.dayOfWeek.slice(0, 3) : "—"}</td>
+                                  <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 11 }}>{r.clockIn}</td>
+                                  <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 11 }}>{r.clockOut}</td>
+                                  <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 11 }}>{r.ipIn}</td>
+                                  <td style={{
+                                    padding: "10px 14px",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    color: r.ipLocation.startsWith("Office") ? "#16a34a" : r.ipLocation === "Remote" ? "#2563eb" : "#999",
+                                  }}>
+                                    {r.ipLocation}
+                                  </td>
+                                  <td style={{ padding: "10px 14px", fontSize: 11, color: r.resolvedLocation !== "—" ? BRAND.indigo : "#ccc" }}>{r.resolvedLocation}</td>
+                                  <td style={{ padding: "10px 14px", fontSize: 11 }}>{r.workSetup}</td>
+                                  <td style={{ padding: "10px 14px", fontSize: 11, fontWeight: 600 }}>{r.scheduledStatus}</td>
+                                  <td style={{ padding: "10px 14px" }}>
+                                    <StatusBadge status={r.auditStatus} />
+                                  </td>
+                                  <td style={{ padding: "10px 14px", fontSize: 11, color: r.auditStatus === "Mismatch" ? BRAND.chilli : "#999", maxWidth: 300, lineHeight: 1.4 }}>
+                                    {r.discrepancies}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Pagination */}
+            <div
+              data-pagination=""
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "16px 20px",
+                background: BRAND.white,
+                borderTop: "1px solid #f0f0f0",
+                borderRadius: "0 0 2px 2px",
+                marginBottom: 20,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 1 }}>
+                  Show
+                </span>
+                {[25, 50, 100, "all"].map(size => (
+                  <button
+                    key={size}
+                    onClick={() => { setPageSize(size); setCurrentPage(1); }}
+                    style={{
+                      padding: "4px 10px",
+                      background: pageSize === size ? BRAND.indigo : "transparent",
+                      color: pageSize === size ? BRAND.white : "#666",
+                      border: `1px solid ${pageSize === size ? BRAND.indigo : "#ddd"}`,
+                      borderRadius: 2,
+                      fontSize: 11,
+                      fontFamily: "'Montserrat', sans-serif",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {size === "all" ? "All" : size}
+                  </button>
+                ))}
+                <span style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 11, color: "#999" }}>
+                  employees per page
+                </span>
               </div>
+
+              {pageSize !== "all" && totalGroupPages > 1 && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button
+                    disabled={currentPage === 1}
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    style={{
+                      padding: "6px 12px", background: "transparent", border: "1px solid #ddd",
+                      borderRadius: 2, fontSize: 11, cursor: currentPage === 1 ? "not-allowed" : "pointer",
+                      opacity: currentPage === 1 ? 0.4 : 1, fontFamily: "'Montserrat', sans-serif", fontWeight: 600,
+                    }}
+                  >
+                    Prev
+                  </button>
+                  <span style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 12, color: BRAND.indigo, fontWeight: 600 }}>
+                    {currentPage} / {totalGroupPages}
+                  </span>
+                  <button
+                    disabled={currentPage === totalGroupPages}
+                    onClick={() => setCurrentPage(p => Math.min(totalGroupPages, p + 1))}
+                    style={{
+                      padding: "6px 12px", background: "transparent", border: "1px solid #ddd",
+                      borderRadius: 2, fontSize: 11, cursor: currentPage === totalGroupPages ? "not-allowed" : "pointer",
+                      opacity: currentPage === totalGroupPages ? 0.4 : 1, fontFamily: "'Montserrat', sans-serif", fontWeight: 600,
+                    }}
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Back / New Scan */}
@@ -1850,6 +2108,11 @@ function Dashboard({ user, onLogout }) {
                   setProcessedSprout(null);
                   setScheduleLookup(null);
                   setPreprocessSummary(null);
+                  setExpandedEmployees(new Set());
+                  setAllExpanded(false);
+                  setPageSize(25);
+                  setCurrentPage(1);
+                  setInnerSortConfig({ key: "date", direction: "asc" });
                   setOfficeIPs([
                     { label: "EST", ipFrom: "116.50.227.176", ipTo: "116.50.227.181" },
                     { label: "ComClark", ipFrom: "161.49.192.112", ipTo: "161.49.192.116" },
@@ -1899,6 +2162,8 @@ function Dashboard({ user, onLogout }) {
         @media print {
           nav, footer, button { display: none !important; }
           div[style*="boxShadow"] { box-shadow: none !important; }
+          [data-accordion-body] { max-height: none !important; overflow: visible !important; }
+          [data-pagination] { display: none !important; }
         }
         table { page-break-inside: auto; }
         tr { page-break-inside: avoid; }
